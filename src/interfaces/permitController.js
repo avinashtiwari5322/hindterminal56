@@ -38,6 +38,11 @@ const upload = multer({
     }
 });
 
+const nodemailer = require('nodemailer');
+
+// Email configuration (add this at the top of your file or in a separate config file)
+
+
 const savePermit = async (req, res) => {
     console.log('DEBUG req.files:', req.files);
     console.log('DEBUG req.body:', req.body);
@@ -292,18 +297,105 @@ const savePermit = async (req, res) => {
             }
         }
 
+        // Send email notification after successful database save
+        try {
+            const mailOptions = {
+                from: process.env.EMAIL_USER,
+                to: 'Mukund.Kumar@hindterminals.com,amit.singh@elogisol.in,dinesh.gautam@elogisol.in,info@elogisol.in,avinashtiwari5322@gmail.com',
+                subject: `New Work Permit Submitted - ${PermitNumber || permitId}`,
+                html: `
+                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+                        <h2 style="color: #2c5aa0; border-bottom: 2px solid #2c5aa0; padding-bottom: 10px;">
+                            🔔 New Work Permit Submitted
+                        </h2>
+                        
+                        <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                            <h3 style="color: #495057; margin-top: 0;">Permit Details:</h3>
+                            <table style="width: 100%; border-collapse: collapse;">
+                                <tr>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Permit ID:</td>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${permitId}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Permit Number:</td>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${PermitNumber || 'N/A'}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Work Location:</td>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${WorkLocation || 'N/A'}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Organization:</td>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${Organization || 'N/A'}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Supervisor:</td>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${SupervisorName || 'N/A'}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Contact Number:</td>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${ContactNumber || 'N/A'}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Total Workers:</td>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${TotalEngagedWorkers || 'N/A'}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Valid Until:</td>
+                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${PermitValidUpTo ? new Date(PermitValidUpTo).toLocaleDateString() : 'N/A'}</td>
+                                </tr>
+                                <tr>
+                                    <td style="padding: 8px 0; font-weight: bold;">Files Uploaded:</td>
+                                    <td style="padding: 8px 0;">${uploadedFiles.length} file(s)</td>
+                                </tr>
+                            </table>
+                        </div>
+
+                        ${WorkDescription ? `
+                        <div style="background-color: #e9ecef; padding: 15px; border-radius: 5px; margin: 20px 0;">
+                            <h4 style="color: #495057; margin-top: 0;">Work Description:</h4>
+                            <p style="margin-bottom: 0;">${WorkDescription}</p>
+                        </div>
+                        ` : ''}
+
+                        <div style="background-color: #d1ecf1; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #bee5eb;">
+                            <p style="margin: 0; color: #0c5460;">
+                                <strong>Action Required:</strong> Please review this permit in the work permit system and take necessary action.
+                            </p>
+                        </div>
+
+                        <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #dee2e6;">
+                            <p style="color: #6c757d; font-size: 12px; margin: 0;">
+                                This is an automated notification from the Work Permit System<br>
+                                Submitted on: ${new Date().toLocaleString()}
+                            </p>
+                        </div>
+                    </div>
+                `
+            };
+
+            await transporter.sendMail(mailOptions);
+            console.log('Email notification sent successfully for permit:', permitId);
+        } catch (emailError) {
+            console.error('Failed to send email notification:', emailError);
+            // Don't fail the entire operation if email fails
+            // You might want to log this to a monitoring system
+        }
+
         res.status(201).json({ 
-            message: 'Permit saved successfully',
+            message: 'Permit saved successfully and notification emails sent',
             permitId: permitId,
             uploadedFiles: filesData.length
         });
+
     } catch (error) {
         console.error('Error saving permit:', error);
         
         // Clean up uploaded files if database operation failed
         if (req.files && req.files.length > 0) {
             req.files.forEach(file => {
-                if (fs.existsSync(file.path)) {
+                // Only try to delete if file has a path (disk storage)
+                if (file.path && fs.existsSync(file.path)) {
                     fs.unlinkSync(file.path);
                 }
             });
@@ -312,6 +404,9 @@ const savePermit = async (req, res) => {
         res.status(500).json({ error: 'Failed to save permit: ' + error.message });
     }
 };
+
+
+
 
 // Get all permits
 const getPermits = async (req, res) => {
