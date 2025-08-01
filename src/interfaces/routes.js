@@ -1,15 +1,18 @@
-const express = require('express');
+const express = require('express'); 
 const multer = require('multer'); 
+const getLastPermitNumber = require("./getLastPermitNumber");
 const router = express.Router();
 const { 
-    upload, 
-    savePermit, 
-    getPermits, 
-    getPermitById, 
+    upload,
+    savePermit,
+    getPermits,
+    getPermitById,
     updatePermit,
     deletePermit,
     getFile,
-    deleteFile
+    getFileById,
+    deleteFile,
+    holdPermit // Add the new function
 } = require('./permitController');
 
 // Routes for permits with file upload support
@@ -19,9 +22,11 @@ router.get('/permits', getPermits);
 router.get('/permits/:id', getPermitById);
 router.put('/permits/:id', upload.array('files', 10), updatePermit);
 router.delete('/permits/:id', deletePermit);
+router.get("/last-permit-number", getLastPermitNumber);
 
 // Routes for file operations
-router.get('/files/:filename', getFile);
+router.get('/files/:filename', getFile); // Keep for backward compatibility
+router.get('/permits/file/:fileId', getFileById); // NEW route for database files
 router.delete('/files/:fileId', deleteFile);
 
 // Error handling middleware for multer
@@ -52,5 +57,8 @@ router.use((error, req, res, next) => {
     
     next(error);
 });
+
+// Route for putting a permit on hold
+router.post('/permits/:id/hold', holdPermit);
 
 module.exports = router;
