@@ -38,17 +38,13 @@ const upload = multer({
     }
 });
 
-const nodemailer = require('nodemailer');
-
-// Email configuration (add this at the top of your file or in a separate config file)
-
-
 const savePermit = async (req, res) => {
     console.log('DEBUG req.files:', req.files);
     console.log('DEBUG req.body:', req.body);
     try {
         const {
             // Basic permit information
+            UserId,
             PermitDate,
             NearestFireAlarmPoint,
             PermitNumber,
@@ -136,6 +132,17 @@ const savePermit = async (req, res) => {
             Approver_UpdatedBy
         } = req.body;
 
+        const pool = await poolPromise;
+
+        // Check if UserId exists in UserMaster
+        const userCheck = await pool.request()
+            .input('UserId', sql.Int, UserId)
+            .query('SELECT UserId FROM UserMaster WHERE UserId = @UserId');
+        
+        if (userCheck.recordset.length === 0) {
+            return res.status(400).json({ error: 'User does not exist in UserMaster' });
+        }
+
         // Handle uploaded files
         const uploadedFiles = req.files || [];
         const filesData = uploadedFiles.map(file => ({
@@ -144,10 +151,8 @@ const savePermit = async (req, res) => {
             mimetype: file.mimetype
         }));
 
-        const pool = await poolPromise;
-
-        // Insert permit data
-        const result = await pool.request()
+        // Insert permit data into WORK_PERMIT
+        const permitResult = await pool.request()
             .input('PermitDate', sql.DateTime, PermitDate)
             .input('NearestFireAlarmPoint', sql.NVarChar(255), NearestFireAlarmPoint)
             .input('PermitNumber', sql.NVarChar(100), PermitNumber)
@@ -158,15 +163,11 @@ const savePermit = async (req, res) => {
             .input('Organization', sql.NVarChar(255), Organization)
             .input('SupervisorName', sql.NVarChar(255), SupervisorName)
             .input('ContactNumber', sql.NVarChar(50), ContactNumber)
-            
-            // Audit fields
             .input('Created_by', sql.NVarChar(100), Created_by || 'System')
             .input('Created_on', sql.DateTime, new Date())
             .input('Updated_by', sql.NVarChar(100), Updated_by || 'System')
             .input('Updated_on', sql.DateTime, new Date())
             .input('Documents', sql.NVarChar(sql.MAX), JSON.stringify(filesData))
-            
-            // Scaffold safety checklist
             .input('ScaffoldChecked', sql.Bit, ScaffoldChecked || false)
             .input('ScaffoldTagged', sql.Bit, ScaffoldTagged || false)
             .input('ScaffoldRechecked', sql.Bit, ScaffoldRechecked || false)
@@ -177,15 +178,11 @@ const savePermit = async (req, res) => {
             .input('EdgeProtection', sql.Bit, EdgeProtection || false)
             .input('Platforms', sql.Bit, Platforms || false)
             .input('SafetyHarness', sql.Bit, SafetyHarness || false)
-            
-            // General safety precautions
             .input('EnergyPrecautions', sql.Bit, EnergyPrecautions || false)
             .input('Illumination', sql.Bit, Illumination || false)
             .input('UnguardedAreas', sql.Bit, UnguardedAreas || false)
             .input('FallProtection', sql.Bit, FallProtection || false)
             .input('AccessMeans', sql.Bit, AccessMeans || false)
-            
-            // PPE requirements
             .input('SafetyHelmet', sql.Bit, SafetyHelmet || false)
             .input('SafetyJacket', sql.Bit, SafetyJacket || false)
             .input('SafetyShoes', sql.Bit, SafetyShoes || false)
@@ -199,8 +196,6 @@ const savePermit = async (req, res) => {
             .input('AnchorPointLifelines', sql.Bit, AnchorPointLifelines || false)
             .input('SelfRetractingLifeline', sql.Bit, SelfRetractingLifeline || false)
             .input('FullBodyHarness', sql.Bit, FullBodyHarness || false)
-            
-            // NEW FIELDS - Additional database columns
             .input('FileName', sql.NVarChar(255), FileName)
             .input('FileSize', sql.BigInt, FileSize)
             .input('FileType', sql.NVarChar(100), FileType)
@@ -208,32 +203,22 @@ const savePermit = async (req, res) => {
             .input('FileData', sql.VarBinary(sql.MAX), FileData)
             .input('REASON', sql.NVarChar(100), REASON)
             .input('ADDITIONAL_PPE', sql.NVarChar(500), ADDITIONAL_PPE)
-            
-            // Issuer fields
             .input('Issuer_Name', sql.NVarChar(100), Issuer_Name)
             .input('Issuer_Designation', sql.NVarChar(100), Issuer_Designation)
             .input('Issuer_DateTime', sql.DateTime, Issuer_DateTime)
             .input('Issuer_UpdatedBy', sql.NVarChar(100), Issuer_UpdatedBy)
-            
-            // Receiver fields
             .input('Receiver_Name', sql.NVarChar(100), Receiver_Name)
             .input('Receiver_Designation', sql.NVarChar(100), Receiver_Designation)
             .input('Receiver_DateTime', sql.DateTime, Receiver_DateTime)
             .input('Receiver_UpdatedBy', sql.NVarChar(100), Receiver_UpdatedBy)
-            
-            // Energy Isolate fields
             .input('EnergyIsolate_Name', sql.NVarChar(100), EnergyIsolate_Name)
             .input('EnergyIsolate_Designation', sql.NVarChar(100), EnergyIsolate_Designation)
             .input('EnergyIsolate_DateTime', sql.DateTime, EnergyIsolate_DateTime)
             .input('EnergyIsolate_UpdatedBy', sql.NVarChar(100), EnergyIsolate_UpdatedBy)
-            
-            // Reviewer fields
             .input('Reviewer_Name', sql.NVarChar(100), Reviewer_Name)
             .input('Reviewer_Designation', sql.NVarChar(100), Reviewer_Designation)
             .input('Reviewer_DateTime', sql.DateTime, Reviewer_DateTime)
             .input('Reviewer_UpdatedBy', sql.NVarChar(100), Reviewer_UpdatedBy)
-            
-            // Approver fields
             .input('Approver_Name', sql.NVarChar(100), Approver_Name)
             .input('Approver_Designation', sql.NVarChar(100), Approver_Designation)
             .input('Approver_DateTime', sql.DateTime, Approver_DateTime)
@@ -278,7 +263,20 @@ const savePermit = async (req, res) => {
                 )
             `);
 
-        const permitId = result.recordset[0].PermitID;
+        const permitId = permitResult.recordset[0].PermitID;
+
+        // Insert into UserPermitMaster
+        await pool.request()
+            .input('UserId', sql.Int, UserId)
+            .input('PermitId', sql.Int, permitId)
+            .input('CurrentPermitStatus', sql.NVarChar(50), 'Active')
+            .input('Status', sql.NVarChar(50), 'Pending')
+            .input('IsActive', sql.Bit, true)
+            .input('DelMark', sql.Bit, false)
+            .query(`
+                INSERT INTO UserPermitMaster (UserId, PermitId, CurrentPermitStatus, Status, IsActive, DelMark)
+                VALUES (@UserId, @PermitId, @CurrentPermitStatus, @Status, @IsActive, @DelMark)
+            `);
 
         // Insert file records if any files were uploaded
         if (uploadedFiles.length > 0) {
@@ -297,105 +295,18 @@ const savePermit = async (req, res) => {
             }
         }
 
-        // Send email notification after successful database save
-        try {
-            const mailOptions = {
-                from: process.env.EMAIL_USER,
-                to: 'Mukund.Kumar@hindterminals.com,amit.singh@elogisol.in,dinesh.gautam@elogisol.in,info@elogisol.in,avinashtiwari5322@gmail.com',
-                subject: `New Work Permit Submitted - ${PermitNumber || permitId}`,
-                html: `
-                    <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-                        <h2 style="color: #2c5aa0; border-bottom: 2px solid #2c5aa0; padding-bottom: 10px;">
-                            🔔 New Work Permit Submitted
-                        </h2>
-                        
-                        <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
-                            <h3 style="color: #495057; margin-top: 0;">Permit Details:</h3>
-                            <table style="width: 100%; border-collapse: collapse;">
-                                <tr>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Permit ID:</td>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${permitId}</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Permit Number:</td>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${PermitNumber || 'N/A'}</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Work Location:</td>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${WorkLocation || 'N/A'}</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Organization:</td>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${Organization || 'N/A'}</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Supervisor:</td>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${SupervisorName || 'N/A'}</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Contact Number:</td>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${ContactNumber || 'N/A'}</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Total Workers:</td>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${TotalEngagedWorkers || 'N/A'}</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6; font-weight: bold;">Valid Until:</td>
-                                    <td style="padding: 8px 0; border-bottom: 1px solid #dee2e6;">${PermitValidUpTo ? new Date(PermitValidUpTo).toLocaleDateString() : 'N/A'}</td>
-                                </tr>
-                                <tr>
-                                    <td style="padding: 8px 0; font-weight: bold;">Files Uploaded:</td>
-                                    <td style="padding: 8px 0;">${uploadedFiles.length} file(s)</td>
-                                </tr>
-                            </table>
-                        </div>
-
-                        ${WorkDescription ? `
-                        <div style="background-color: #e9ecef; padding: 15px; border-radius: 5px; margin: 20px 0;">
-                            <h4 style="color: #495057; margin-top: 0;">Work Description:</h4>
-                            <p style="margin-bottom: 0;">${WorkDescription}</p>
-                        </div>
-                        ` : ''}
-
-                        <div style="background-color: #d1ecf1; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #bee5eb;">
-                            <p style="margin: 0; color: #0c5460;">
-                                <strong>Action Required:</strong> Please review this permit in the work permit system and take necessary action.
-                            </p>
-                        </div>
-
-                        <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #dee2e6;">
-                            <p style="color: #6c757d; font-size: 12px; margin: 0;">
-                                This is an automated notification from the Work Permit System<br>
-                                Submitted on: ${new Date().toLocaleString()}
-                            </p>
-                        </div>
-                    </div>
-                `
-            };
-
-            await transporter.sendMail(mailOptions);
-            console.log('Email notification sent successfully for permit:', permitId);
-        } catch (emailError) {
-            console.error('Failed to send email notification:', emailError);
-            // Don't fail the entire operation if email fails
-            // You might want to log this to a monitoring system
-        }
-
         res.status(201).json({ 
-            message: 'Permit saved successfully and notification emails sent',
+            message: 'Permit saved successfully',
             permitId: permitId,
             uploadedFiles: filesData.length
         });
-
     } catch (error) {
         console.error('Error saving permit:', error);
         
         // Clean up uploaded files if database operation failed
         if (req.files && req.files.length > 0) {
             req.files.forEach(file => {
-                // Only try to delete if file has a path (disk storage)
-                if (file.path && fs.existsSync(file.path)) {
+                if (fs.existsSync(file.path)) {
                     fs.unlinkSync(file.path);
                 }
             });
@@ -405,8 +316,56 @@ const savePermit = async (req, res) => {
     }
 };
 
+// Get permits by user
+const getPermitsByUser = async (req, res) => {
+    try {
+        const { UserId } = req.query;
+        console.log('DEBUG UserId:', UserId);
+        // Validate UserId
+        if (!UserId || isNaN(UserId)) {
+            return res.status(400).json({ error: 'Valid UserId is required' });
+        }
 
+        const pool = await poolPromise;
 
+        // Check if UserId exists in UserMaster
+        const userCheck = await pool.request()
+            .input('UserId', sql.Int, UserId)
+            .query('SELECT UserId FROM UserMaster WHERE UserId = @UserId');
+        
+        if (userCheck.recordset.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Get permits for the user
+        const result = await pool.request()
+            .input('UserId', sql.Int, UserId)
+            .query(`
+                SELECT p.*, 
+                       upm.CurrentPermitStatus,
+                       upm.Status as PermitStatus,
+                       (SELECT COUNT(*) FROM PERMIT_FILES f WHERE f.PermitID = p.PermitID) as FileCount
+                FROM WORK_PERMIT p
+                INNER JOIN UserPermitMaster upm ON p.PermitID = upm.PermitId
+                WHERE upm.UserId = @UserId AND upm.IsActive = 1 AND upm.DelMark = 0
+                ORDER BY p.Created_on DESC
+            `);
+        
+        // For each permit, get its files
+        for (let permit of result.recordset) {
+            const filesResult = await pool.request()
+                .input('PermitID', sql.Int, permit.PermitID)
+                .query('SELECT FileID, FileName, FileSize, FileType, UploadedAt FROM PERMIT_FILES WHERE PermitID = @PermitID ORDER BY UploadedAt DESC');
+            
+            permit.Files = filesResult.recordset;
+        }
+        
+        res.json(result.recordset);
+    } catch (error) {
+        console.error('Error fetching permits:', error);
+        res.status(500).json({ error: 'Failed to fetch permits: ' + error.message });
+    }
+};
 
 // Get all permits
 const getPermits = async (req, res) => {
@@ -861,5 +820,6 @@ module.exports = {
     getFile,
     getFileById, // NEW function
     deleteFile,
-    holdPermit // Add the new function to exports
+    holdPermit, // Add the new function to exports
+    getPermitsByUser
 };

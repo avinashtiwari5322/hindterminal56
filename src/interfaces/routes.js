@@ -4,6 +4,7 @@ const getLastPermitNumber = require("./getLastPermitNumber");
 const router = express.Router();
 const { 
     upload,
+    getPermitsByUser,
     savePermit,
     getPermits,
     getPermitById,
@@ -15,10 +16,22 @@ const {
     holdPermit // Add the new function
 } = require('./permitController');
 
+// Combined route for permits
+router.get('/permits', async (req, res) => {
+    const { UserId } = req.query;
+    if (UserId) {
+        // Call getPermitsByUser logic if UserId is provided
+        await getPermitsByUser(req, res);
+    } else {
+        // Call getPermits logic if no UserId
+        await getPermits(req, res);
+    }
+});
 // Routes for permits with file upload support
 router.post('/permits', upload.array('files', 10), savePermit);
 router.post('/permits/draft', upload.array('files', 10), savePermit);
-router.get('/permits', getPermits);
+// router.get('/permits', getPermits);
+// router.get('/permits', getPermitsByUser);
 router.get('/permits/:id', getPermitById);
 router.put('/permits/:id', upload.array('files', 10), updatePermit);
 router.delete('/permits/:id', deletePermit);
