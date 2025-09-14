@@ -1,3 +1,123 @@
+// API: Approve a permit (set CurrentPermitStatus to Approved)
+const approvePermit = async (req, res) => {
+    try {
+        const { PermitId } = req.body;
+        if (!PermitId) {
+            return res.status(400).json({ error: 'PermitId is required.' });
+        }
+        const pool = await poolPromise;
+        const result = await pool.request()
+            .input('PermitId', sql.Int, PermitId)
+            .query("UPDATE UserPermitMaster SET CurrentPermitStatus = 'Approved' WHERE PermitId = @PermitId");
+        if (result.rowsAffected[0] === 0) {
+            return res.status(404).json({ error: 'Permit not found.' });
+        }
+        res.json({ message: 'Permit approved successfully.' });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to approve permit.' });
+    }
+};
+
+// API: Close a permit (set CurrentPermitStatus to Close)
+const closePermit = async (req, res) => {
+    try {
+        const { PermitId } = req.body;
+        if (!PermitId) {
+            return res.status(400).json({ error: 'PermitId is required.' });
+        }
+        const pool = await poolPromise;
+        const result = await pool.request()
+            .input('PermitId', sql.Int, PermitId)
+            .query("UPDATE UserPermitMaster SET CurrentPermitStatus = 'Close' WHERE PermitId = @PermitId");
+        if (result.rowsAffected[0] === 0) {
+            return res.status(404).json({ error: 'Permit not found.' });
+        }
+        res.json({ message: 'Permit closed successfully.' });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to close permit.' });
+    }
+};
+// GET: Serve admin document from PermitAdminAttachment by PermitId
+const getAdminDocumentByPermitId = async (req, res) => {
+    try {
+        const { permitId } = req.params;
+        const permitIdNumber = parseInt(permitId, 10);
+        if (isNaN(permitIdNumber) || permitIdNumber <= 0) {
+            return res.status(400).json({ error: 'Invalid PermitId. Must be a positive number.' });
+        }
+
+        const pool = await poolPromise;
+        // Get the first active, non-deleted admin document for this permit, including file data
+        const result = await pool.request()
+            .input('PermitId', sql.Int, permitIdNumber)
+            .query('SELECT TOP 1 Documents, FileData FROM PermitAdminAttachment WHERE PermitId = @PermitId AND IsActive = 1 AND DelMark = 0');
+
+        if (result.recordset.length === 0) {
+            return res.status(404).json({ error: 'Admin document not found' });
+        }
+
+        // Documents is a JSON array, get the first file info
+        let docArr;
+        try {
+            docArr = JSON.parse(result.recordset[0].Documents);
+        } catch (e) {
+            return res.status(500).json({ error: 'Invalid document format' });
+        }
+        if (!Array.isArray(docArr) || docArr.length === 0) {
+            return res.status(404).json({ error: 'No admin document found' });
+        }
+        const doc = docArr[0];
+        const fileData = result.recordset[0].FileData;
+        if (!fileData) {
+            return res.status(404).json({ error: 'No file data found for admin document' });
+        }
+
+        res.setHeader('Content-Type', doc.mimetype || 'application/octet-stream');
+        res.setHeader('Content-Disposition', `inline; filename="${doc.originalName || 'admin-document'}"`);
+        res.setHeader('Cache-Control', 'public, max-age=31536000');
+        res.send(fileData);
+    } catch (error) {
+        console.error('Error serving admin document:', error);
+        res.status(500).json({ error: 'Failed to serve admin document' });
+    }
+};
+// POST: Add admin document to PermitAdminAttachment
+const uploadAdminDocument = async (req, res) => {
+    try {
+        const { PermitId, UserId } = req.body;
+        if (!PermitId || !UserId) {
+            return res.status(400).json({ error: 'PermitId and UserId are required.' });
+        }
+        if (!req.file) {
+            return res.status(400).json({ error: 'File is required.' });
+        }
+
+        // Prepare document info as JSON array (can be extended for multiple files)
+        const docInfo = [{
+            originalName: req.file.originalname,
+            size: req.file.size,
+            mimetype: req.file.mimetype
+        }];
+
+        const pool = await poolPromise;
+        await pool.request()
+            .input('PermitId', sql.Int, PermitId)
+            .input('Documents', sql.NVarChar(sql.MAX), JSON.stringify(docInfo))
+            .input('FileData', sql.VarBinary(sql.MAX), req.file.buffer)
+            .input('CreatedBy', sql.NVarChar(100), UserId.toString())
+            .query(`
+                INSERT INTO PermitAdminAttachment (PermitId, Documents, FileData, CreatedBy)
+                VALUES (@PermitId, @Documents, @FileData, @CreatedBy)
+            `);
+
+        res.status(201).json({ success: true, message: 'Admin document uploaded successfully.' });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to upload admin document.' });
+    }
+};
 const multer = require('multer'); 
 const path = require('path');
 const fs = require('fs');
@@ -373,8 +493,12 @@ const getPermits = async (req, res) => {
         const pool = await poolPromise;
         const result = await pool.request().query(`
             SELECT p.*, 
+                   upm.CurrentPermitStatus,
+                   upm.Status as PermitStatus,
                    (SELECT COUNT(*) FROM PERMIT_FILES f WHERE f.PermitID = p.PermitID) as FileCount
-            FROM WORK_PERMIT p 
+            FROM WORK_PERMIT p
+            INNER JOIN UserPermitMaster upm ON p.PermitID = upm.PermitId
+            WHERE upm.IsActive = 1 AND upm.DelMark = 0
             ORDER BY p.Created_on DESC
         `);
         
@@ -412,10 +536,22 @@ const getPermitById = async (req, res) => {
         const filesResult = await pool.request()
             .input('PermitID', sql.Int, id)
             .query('SELECT FileID, FileName, FileSize, FileType, UploadedAt FROM PERMIT_FILES WHERE PermitID = @PermitID ORDER BY UploadedAt DESC');
-        
+
+        // Get admin documents from PermitAdminAttachment
+        const adminDocsResult = await pool.request()
+            .input('PermitID', sql.Int, id)
+            .query('SELECT Documents FROM PermitAdminAttachment WHERE PermitId = @PermitID AND IsActive = 1 AND DelMark = 0');
+
         const permit = permitResult.recordset[0];
         permit.files = filesResult.recordset;
-        
+        permit.AdminDocuments = adminDocsResult.recordset.map(row => {
+            try {
+                return row.Documents ? JSON.parse(row.Documents) : null;
+            } catch (e) {
+                return row.Documents; // fallback to raw if not valid JSON
+            }
+        }).filter(Boolean);
+
         res.json(permit);
     } catch (error) {
         console.error(error);
@@ -762,12 +898,17 @@ const holdPermit = async (req, res) => {
         const { reason } = req.body;
         const pool = await poolPromise;
         
-        // Update only the REASON field, not adding any Status column
+        // Update the REASON field in WORK_PERMIT
         const updateResult = await pool.request()
             .input('PermitID', sql.Int, id)
             .input('Reason', sql.NVarChar, reason)
             .query('UPDATE WORK_PERMIT SET REASON = @Reason WHERE PermitID = @PermitID');
-        
+
+        // Also set CurrentPermitStatus to 'Hold' in UserPermitMaster
+        await pool.request()
+            .input('PermitID', sql.Int, id)
+            .query("UPDATE UserPermitMaster SET CurrentPermitStatus = 'Hold' WHERE PermitId = @PermitID");
+
         if (updateResult.rowsAffected[0] === 0) {
             return res.status(404).json({ error: 'Permit not found' });
         }
@@ -819,7 +960,11 @@ module.exports = {
     deletePermit,
     getFile,
     getFileById, // NEW function
+    getAdminDocumentByPermitId, // NEW function
     deleteFile,
     holdPermit, // Add the new function to exports
-    getPermitsByUser
+    getPermitsByUser,
+    uploadAdminDocument,
+    approvePermit,
+    closePermit
 };

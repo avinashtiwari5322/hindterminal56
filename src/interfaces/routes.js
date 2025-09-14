@@ -1,6 +1,7 @@
 const express = require('express'); 
 const multer = require('multer'); 
 const getLastPermitNumber = require("./getLastPermitNumber");
+const { login } = require('../interfaces/loginController');
 const router = express.Router();
 const { 
     upload,
@@ -12,9 +13,22 @@ const {
     deletePermit,
     getFile,
     getFileById,
+    getAdminDocumentByPermitId,
     deleteFile,
-    holdPermit // Add the new function
+    holdPermit, // Add the new function
+    uploadAdminDocument,
+    approvePermit,
+    closePermit
 } = require('./permitController');
+// API endpoint to approve a permit (set CurrentPermitStatus to Approved)
+router.post('/permits/approve', approvePermit);
+
+// API endpoint to close a permit (set CurrentPermitStatus to Close)
+router.post('/permits/close', closePermit);
+// API endpoint to get admin document metadata for a permit
+router.get('/permits/:permitId/admin-document', getAdminDocumentByPermitId);
+// API endpoint to upload admin document for a permit
+router.post('/permits/admin-document', upload.single('file'), uploadAdminDocument);
 
 // Combined route for permits
 router.get('/permits', async (req, res) => {
@@ -27,6 +41,7 @@ router.get('/permits', async (req, res) => {
         await getPermits(req, res);
     }
 });
+router.post('/login', login);
 // Routes for permits with file upload support
 router.post('/permits', upload.array('files', 10), savePermit);
 router.post('/permits/draft', upload.array('files', 10), savePermit);
