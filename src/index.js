@@ -4,6 +4,7 @@ require("dotenv").config({ path: path.join(__dirname, "../.env") });
 const multer = require('multer'); 
 const cors = require("cors");
 const permitAdditionalDataRoutes = require("./interfaces/adminRoutes");
+const { startExpirePermitsCron } = require("../src/jobs/expirePermitsCron");
 
 // Import database connection
 const { poolPromise } = require("./config/db");
@@ -65,6 +66,9 @@ const PORT = process.env.PORT || 3000;
 // Start server only after database connection is established
 poolPromise
   .then(() => {
+    // Start cron job for checking expired permits
+    startExpirePermitsCron();
+
     app.listen(PORT, () => {
       console.log(`✅ Server running on port ${PORT}`);
       console.log(`✅ Database connected and ready`);

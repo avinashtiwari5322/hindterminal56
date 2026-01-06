@@ -6,7 +6,7 @@ const getLastPermitNumber = async (req, res) => {
 
     const result = await pool
       .request()
-      .query("SELECT TOP 1 PermitNumber FROM WORK_PERMIT ORDER BY PermitID DESC");
+      .query("SELECT TOP 1 PermitNumber FROM PermitMaster ORDER BY PermitID DESC");
 
     if (result.recordset.length === 0) {
       return res.status(404).json({ message: "No permit found." });
