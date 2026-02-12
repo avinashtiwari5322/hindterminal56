@@ -1,12 +1,12 @@
-
 const { poolPromise, sql } = require("../config/db");
 const transporter = require("../config/mailer");
 const bcrypt = require('bcryptjs');
+const crypto = require("crypto");
 
 
 /* Random Password Generator */
-const generateRandomPassword = (length = 10) => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@#$_';
+const generateRandomPassword = (length = 4) => {
+    const chars = '123456789';
     return Array.from({ length }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 };
 
@@ -20,16 +20,18 @@ const comparePassword = async (plain, hash) => {
 };
 
 /* Email Sender */
-const sendPasswordEmail = async (email, username, password) => {
+const sendPasswordEmail = async (email, username, password, locationName) => {
+    const url = process.env.UI_URL || 'http://localhost:3000';
     await transporter.sendMail({
         from: process.env.EMAIL_USER,
         to: email,
         subject: 'Login Credentials',
         html: `
-            <p>Hello ${username},</p>
-            <p>Your account has been created.</p>
+            <p>Your account has been created for the ${locationName} location.</p>
+            <p>Username - ${username}</p>
             <p><b>Password:</b> ${password}</p>
             <p>Please change your password after login.</p>
+            <p><a href="${url}">Login Here</a></p>
         `
     });
 };
@@ -153,11 +155,16 @@ const getUserMasterData = async (req, res) => {
                     r.RoleName,
                     c.CompanyId,
                     c.CompanyName,
-                    d.DesignationName
+                    d.DesignationName,
+                    d.DesignationId,
+                    u.LocationId,
+                    l.LocationName,
+                    CONVERT(VARCHAR, u.CreatedOn, 127) AS CreatedOn
                 FROM UserMaster u
                 INNER JOIN RoleMaster r ON u.RoleId = r.RoleId
                 INNER JOIN UserCompanyMaster cum ON u.UserId = cum.UserId
                 INNER JOIN CompanyMaster c ON cum.CompanyId = c.CompanyId
+                INNER JOIN LocationMaster l ON u.LocationId = l.LocationId
                 LEFT JOIN DesignationMaster d ON u.DesignationId = d.DesignationId
                 WHERE cum.CompanyId = @CompanyId
                   AND u.IsActive = 1 AND u.DelMark = 0
@@ -195,7 +202,7 @@ const getLocationMaster = async (req, res) => {
         const result = await pool.request()
             .query(`
                 SELECT 
-                    LocationName
+                    *
                 FROM LocationMaster
                 WHERE IsActive = 1 
                   AND DelMark = 0
@@ -346,7 +353,7 @@ const getCompanyMasterData = async (req, res) => {
 ========================================================= */
 const addUserMaster = async (req, res) => {
     try {
-        const { CompanyId, UserId, UserName, Name, MailId, RoleId, DesignationId } = req.body;
+        const { CompanyId, UserId, UserName, Name, MailId, RoleId, DesignationId, LocationId } = req.body;
         const userName = UserName.trim();
         const pool = await poolPromise;
 
@@ -359,10 +366,11 @@ const addUserMaster = async (req, res) => {
         const userCheck = await pool.request()
             .input('UserName', sql.VarChar, userName)
             .input('CompanyId', sql.Int, CompanyId)
+            .input('LocationId', sql.Int, LocationId)
             .query(`
         SELECT 1 
         FROM UserMaster
-        INNER JOIN UserCompanyMaster cum ON UserMaster.UserId = cum.UserId AND cum.CompanyId = @CompanyId AND cum.IsActive = 1 AND cum.DelMark = 0
+        INNER JOIN UserCompanyMaster cum ON UserMaster.UserId = cum.UserId AND cum.CompanyId = @CompanyId AND cum.IsActive = 1 AND cum.DelMark = 0 And UserMaster.LocationId=@LocationId
         WHERE UserName = @UserName AND CompanyId = @CompanyId
           AND UserMaster.IsActive = 1
           AND UserMaster.DelMark = 0
@@ -374,7 +382,6 @@ const addUserMaster = async (req, res) => {
                 message: 'Username already exists'
             });
         }
-
 
         // Generate & hash password
         const plainPassword = generateRandomPassword();
@@ -389,12 +396,13 @@ const addUserMaster = async (req, res) => {
             .input('RoleId', sql.Int, RoleId)
             .input('UserId', sql.Int, UserId)
             .input('DesignationId', sql.Int, DesignationId)
+            .input('LocationId', sql.Int, LocationId)
             .query(`
                 INSERT INTO UserMaster
-                (UserName, Name, MailId, Password, RoleId, DesignationId, IsActive, DelMark, CreatedOn, CreatedBy)
+                (UserName, Name, MailId, Password, RoleId, DesignationId, LocationId, IsActive, DelMark, CreatedOn, CreatedBy)
                 OUTPUT INSERTED.UserId
                 VALUES
-                (@UserName, @Name, @MailId, @Password, @RoleId, @DesignationId, 1, 0, GETDATE(), @UserId)
+                (@UserName, @Name, @MailId, @Password, @RoleId, @DesignationId, @LocationId, 1, 0, GETDATE(), @UserId)
             `);
 
         const newUserId = result.recordset[0].UserId;
@@ -407,9 +415,17 @@ const addUserMaster = async (req, res) => {
                 INSERT INTO UserCompanyMaster (UserId, CompanyId, CreatedOn, CreatedBy)
                 VALUES (@UserId, @CompanyId, GETDATE(), @UserId)
             `);
+        const LocationNameResult = await pool.request()
+            .input('LocationId', sql.Int, LocationId)
+            .query(`
+                SELECT LocationName
+                FROM LocationMaster
+                WHERE LocationId = @LocationId AND IsActive = 1 AND DelMark = 0
+            `);
+        const LocationName = LocationNameResult.recordset.length > 0 ? LocationNameResult.recordset[0].LocationName : '';
 
         // Send email
-        await sendPasswordEmail(MailId, UserName, plainPassword);
+        await sendPasswordEmail(MailId, UserName, plainPassword, LocationName);
 
         res.json({
             success: true,
@@ -427,7 +443,7 @@ const addUserMaster = async (req, res) => {
 ========================================================= */
 const updateUserMaster = async (req, res) => {
     try {
-        const { CompanyId, UserId, TargetUserId, Name, UserName, MailId, DesignationId } = req.body;
+        const { CompanyId, UserId, TargetUserId, Name, UserName, MailId, DesignationId, LocationId } = req.body;
         const userName = UserName.trim();
         const pool = await poolPromise;
 
@@ -449,13 +465,12 @@ const updateUserMaster = async (req, res) => {
           AND UserMaster.UserId <> @TargetUserId
     `);
 
-if (userCheck.recordset.length > 0) {
-    return res.status(409).json({
-        success: false,
-        message: 'Username already exists'
-    });
-}
-
+        if (userCheck.recordset.length > 0) {
+            return res.status(409).json({
+                success: false,
+                message: 'Username already exists'
+            });
+        }
 
         await pool.request()
             .input('TargetUserId', sql.Int, TargetUserId)
@@ -464,12 +479,14 @@ if (userCheck.recordset.length > 0) {
             .input('MailId', sql.VarChar, MailId)
             .input('UserId', sql.Int, UserId)
             .input('DesignationId', sql.Int, DesignationId)
+            .input('LocationId', sql.Int, LocationId)
             .query(`
                 UPDATE UserMaster
                 SET Name = @Name,
                     UserName = @UserName,
                     MailId = @MailId,
                     DesignationId = @DesignationId,
+                    LocationId = @LocationId,
                     UpdatedOn = GETDATE(),
                     UpdatedBy = @UserId
                 WHERE UserId = @TargetUserId
@@ -752,79 +769,73 @@ const deleteLocationMaster = async (req, res) => {
 ========================================================= */
 const changePassword = async (req, res) => {
     try {
-        const { CompanyId, UserName, OldPassword, NewPassword } = req.body;
+        const { userId, username, newPassword, oldPassword, otp } = req.body;
+        
         const pool = await poolPromise;
+        let usernameLocal = "";
 
-        // 1️⃣ Check user exists & mapped with company
-        const userResult = await pool.request()
-            .input('UserName', sql.VarChar, UserName)
-            .input('CompanyId', sql.Int, CompanyId)
-            .query(`
-                SELECT u.UserId, u.Password
-                FROM UserMaster u
-                INNER JOIN UserCompanyMaster uc 
-                    ON u.UserId = uc.UserId
-                WHERE u.UserName = @UserName
-                  AND uc.CompanyId = @CompanyId
-                  AND u.IsActive = 1
-                  AND u.DelMark = 0
-            `);
+        if (otp) {
+            checkUsername = await pool.request()
+                .input("userId", sql.Int, userId)
+                .query(`SELECT UserName FROM UserMaster WHERE UserId = @userId AND IsActive = 1 AND DelMark = 0`);
+            if (checkUsername.recordset.length === 0) {
+                return res.status(404).json({ success: false, message: "User not found." });
+            }
+            usernameLocal = checkUsername.recordset[0].UserName;
+            // OTP-based password change
+            const otpResult = await pool.request()
+                .input("userId", sql.Int, userId)
+                .input("otp", sql.VarChar, otp)
+                .query(`SELECT Expiry FROM OtpTable WHERE UserId = @userId AND Otp = @otp`);
 
-        if (userResult.recordset.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found or not mapped to company'
-            });
+            if (otpResult.recordset.length === 0) {
+                return res.status(400).json({ success: false, message: "Invalid OTP." });
+            }
+
+            const expiry = otpResult.recordset[0].Expiry;
+            if (new Date() > expiry) {
+                return res.status(400).json({ success: false, message: "OTP has expired." });
+            }
+        } else if (oldPassword) {
+            // Old-password-based password change
+            usernameLocal= username;
+            const userResult = await pool.request()
+                .input("username", sql.VarChar, username)
+                .query(`SELECT Password FROM UserMaster WHERE UserName = @username AND IsActive = 1 AND DelMark = 0`);
+
+            if (userResult.recordset.length === 0) {
+                return res.status(404).json({ success: false, message: "User not found." });
+            }
+
+            const dbPassword = userResult.recordset[0].Password;
+
+            const isMatch = await comparePassword(oldPassword, dbPassword);
+            if (!isMatch) {
+                return res.status(400).json({ success: false, message: "Old password is incorrect." });
+            }
+
+            const samePassword = await comparePassword(newPassword, dbPassword);
+            if (samePassword) {
+                return res.status(400).json({ success: false, message: "New password cannot be the same as the old password." });
+            }
+        } else {
+            return res.status(400).json({ success: false, message: "Either OTP or old password is required." });
         }
 
-        const dbPassword = userResult.recordset[0].Password;
-
-        // 2️⃣ Compare old password
-        const isMatch = await comparePassword(OldPassword, dbPassword);
-        if (!isMatch) {
-            return res.status(400).json({
-                success: false,
-                message: 'Old password is incorrect'
-            });
-        }
-
-        // 3️⃣ Prevent same password
-        const samePassword = await comparePassword(NewPassword, dbPassword);
-        if (samePassword) {
-            return res.status(400).json({
-                success: false,
-                message: 'New password cannot be same as old password'
-            });
-        }
-
-        // 4️⃣ Hash new password
-        const hashedPassword = await hashPassword(NewPassword);
-
-        // 5️⃣ Update password
+        const hashedPassword = await hashPassword(newPassword);
         await pool.request()
-            .input('UserId', sql.Int, userResult.recordset[0].UserId)
-            .input('Password', sql.VarChar, hashedPassword)
-            .query(`
-                UPDATE UserMaster
-                SET Password = @Password,
-                    UpdatedOn = GETDATE(),
-                    UpdatedBy = @UserId
-                WHERE UserId = @UserId
-            `);
+            .input("username", sql.VarChar, usernameLocal)
+            .input("password", sql.VarChar, hashedPassword)
+            .query(`UPDATE UserMaster SET Password = @password WHERE UserName = @username`);
 
-        res.json({
-            success: true,
-            message: 'Password changed successfully'
-        });
-
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({
-            success: false,
-            message: err.message
-        });
+        res.json({ success: true, message: "Password changed successfully." });
+    } catch (error) {
+        console.error("Error in changePassword:", error);
+        res.status(500).json({ success: false, message: "Failed to change password." });
     }
 };
+
+
 
 /* =========================================================
    RESET PASSWORD (SUPER USER)
@@ -1074,12 +1085,12 @@ const getDepartments = async (req, res) => {
 // ADD
 const addAlarmPoint = async (req, res) => {
     try {
-        const { AlarmPointName, CompanyId, UserId } = req.body;
+        const { AlarmPointName, CompanyId, UserId, LocationId } = req.body;
         const pool = await poolPromise;
-        if (!CompanyId || !UserId) {
+        if (!CompanyId || !UserId || !LocationId) {
             return res.status(400).json({
                 success: false,
-                message: 'CompanyId and UserId are required'
+                message: 'CompanyId, UserId, and LocationId are required'
             });
         }
         const isValidUser = await validateSuperUser(pool, CompanyId, UserId);
@@ -1092,11 +1103,13 @@ const addAlarmPoint = async (req, res) => {
         const check = await pool.request()
             .input("AlarmPointName", sql.NVarChar, AlarmPointName)
             .input("CompanyId", sql.Int, CompanyId)
+            .input("LocationId", sql.Int, LocationId)
             .query(`
                 SELECT 1
                 FROM AlarmPointMaster
                 WHERE AlarmPointName = @AlarmPointName
                   AND CompanyId = @CompanyId
+                  AND LocationId = @LocationId
                   AND IsActive = 1 AND DelMark = 0
             `);
 
@@ -1107,10 +1120,11 @@ const addAlarmPoint = async (req, res) => {
             .input("AlarmPointName", sql.NVarChar, AlarmPointName)
             .input("CompanyId", sql.Int, CompanyId)
             .input("UserId", sql.Int, UserId)
+            .input("LocationId", sql.Int, LocationId)
             .query(`
                 INSERT INTO AlarmPointMaster
-                (AlarmPointName, CompanyId, IsActive, DelMark, CreatedOn, CreatedBy)
-                VALUES (@AlarmPointName, @CompanyId, 1, 0, GETDATE(), @UserId)
+                (AlarmPointName, CompanyId, LocationId, IsActive, DelMark, CreatedOn, CreatedBy)
+                VALUES (@AlarmPointName, @CompanyId, @LocationId, 1, 0, GETDATE(), @UserId)
             `);
 
         res.json({ success: true, message: "Alarm point added successfully" });
@@ -1122,12 +1136,12 @@ const addAlarmPoint = async (req, res) => {
 // UPDATE
 const updateAlarmPoint = async (req, res) => {
     try {
-        const { AlarmPointId, AlarmPointName, UserId, CompanyId } = req.body;
+        const { AlarmPointId, AlarmPointName, UserId, CompanyId, LocationId } = req.body;
         const pool = await poolPromise;
-        if (!CompanyId || !UserId) {
+        if (!CompanyId || !UserId || !LocationId) {
             return res.status(400).json({
                 success: false,
-                message: 'CompanyId and UserId are required'
+                message: 'CompanyId, UserId, and LocationId are required'
             });
         }
         const isValidUser = await validateSuperUser(pool, CompanyId, UserId);
@@ -1140,11 +1154,13 @@ const updateAlarmPoint = async (req, res) => {
         const check = await pool.request()
             .input("AlarmPointName", sql.NVarChar, AlarmPointName)
             .input("AlarmPointId", sql.Int, AlarmPointId)
+            .input("LocationId", sql.Int, LocationId)
             .query(`
                 SELECT 1
                 FROM AlarmPointMaster
                 WHERE AlarmPointName = @AlarmPointName
                   AND AlarmPointId <> @AlarmPointId
+                  AND LocationId = @LocationId
                   AND IsActive = 1 AND DelMark = 0
             `);
 
@@ -1155,9 +1171,10 @@ const updateAlarmPoint = async (req, res) => {
             .input("AlarmPointId", sql.Int, AlarmPointId)
             .input("AlarmPointName", sql.NVarChar, AlarmPointName)
             .input("UserId", sql.Int, UserId)
+            .input("LocationId", sql.Int, LocationId)
             .query(`
                 UPDATE AlarmPointMaster
-                SET AlarmPointName = @AlarmPointName,
+                SET AlarmPointName = @AlarmPointName, LocationId = @LocationId,
                     UpdatedOn = GETDATE(),
                     UpdatedBy = @UserId
                 WHERE AlarmPointId = @AlarmPointId AND DelMark = 0
@@ -1207,7 +1224,7 @@ const deleteAlarmPoint = async (req, res) => {
 // READ
 const getAlarmPoints = async (req, res) => {
     try {
-        const { CompanyId, UserId } = req.body;
+        const { CompanyId, UserId, LocationId } = req.body;
         const pool = await poolPromise;
         if (!CompanyId || !UserId) {
             return res.status(400).json({
@@ -1215,14 +1232,16 @@ const getAlarmPoints = async (req, res) => {
                 message: 'CompanyId and UserId are required'
             });
         }
-       
+      
 
         const result = await pool.request()
             .input("CompanyId", sql.Int, CompanyId)
+            .input("LocationId", sql.Int, LocationId)
             .query(`
                 SELECT *
                 FROM AlarmPointMaster
                 WHERE CompanyId = @CompanyId
+                  AND LocationId = @LocationId
                   AND IsActive = 1 AND DelMark = 0
                 ORDER BY AlarmPointName
             `);
@@ -1240,12 +1259,12 @@ const getAlarmPoints = async (req, res) => {
 // ADD
 const addWorkLocation = async (req, res) => {
     try {
-        const { WorkLocationName, CompanyId, UserId } = req.body;
+        const { WorkLocationName, CompanyId, UserId, LocationId } = req.body;
         const pool = await poolPromise;
-        if (!CompanyId || !UserId) {
+        if (!CompanyId || !UserId || !LocationId) {
             return res.status(400).json({
                 success: false,
-                message: 'CompanyId and UserId are required'
+                message: 'CompanyId, UserId, and LocationId are required'
             });
         }
         const isValidUser = await validateSuperUser(pool, CompanyId, UserId);
@@ -1258,11 +1277,13 @@ const addWorkLocation = async (req, res) => {
         const check = await pool.request()
             .input("WorkLocationName", sql.NVarChar, WorkLocationName)
             .input("CompanyId", sql.Int, CompanyId)
+            .input("LocationId", sql.Int, LocationId)
             .query(`
                 SELECT 1
                 FROM WorkLocationMaster
                 WHERE WorkLocationName = @WorkLocationName
                   AND CompanyId = @CompanyId
+                  AND LocationId = @LocationId
                   AND IsActive = 1 AND DelMark = 0
             `);
 
@@ -1272,11 +1293,12 @@ const addWorkLocation = async (req, res) => {
         await pool.request()
             .input("WorkLocationName", sql.NVarChar, WorkLocationName)
             .input("CompanyId", sql.Int, CompanyId)
+            .input("LocationId", sql.Int, LocationId)
             .input("UserId", sql.Int, UserId)
             .query(`
                 INSERT INTO WorkLocationMaster
-                (WorkLocationName, CompanyId, IsActive, DelMark, CreatedOn, CreatedBy)
-                VALUES (@WorkLocationName, @CompanyId, 1, 0, GETDATE(), @UserId)
+                (WorkLocationName, CompanyId, LocationId, IsActive, DelMark, CreatedOn, CreatedBy)
+                VALUES (@WorkLocationName, @CompanyId, @LocationId, 1, 0, GETDATE(), @UserId)
             `);
 
         res.json({ success: true, message: "Work location added successfully" });
@@ -1288,12 +1310,12 @@ const addWorkLocation = async (req, res) => {
 // UPDATE
 const updateWorkLocation = async (req, res) => {
     try {
-        const { WorkLocationId, WorkLocationName, UserId, CompanyId } = req.body;
+        const { WorkLocationId, WorkLocationName, UserId, CompanyId, LocationId } = req.body;
         const pool = await poolPromise;
-        if (!CompanyId || !UserId) {
+        if (!CompanyId || !UserId || !LocationId) {
             return res.status(400).json({
                 success: false,
-                message: 'CompanyId and UserId are required'
+                message: 'CompanyId, UserId, and LocationId are required'
             });
         }
         const isValidUser = await validateSuperUser(pool, CompanyId, UserId);
@@ -1306,11 +1328,13 @@ const updateWorkLocation = async (req, res) => {
         const check = await pool.request()
             .input("WorkLocationName", sql.NVarChar, WorkLocationName)
             .input("WorkLocationId", sql.Int, WorkLocationId)
+            .input("LocationId", sql.Int, LocationId)
             .query(`
                 SELECT 1
                 FROM WorkLocationMaster
                 WHERE WorkLocationName = @WorkLocationName
                   AND WorkLocationId <> @WorkLocationId
+                  AND LocationId = @LocationId
                   AND IsActive = 1 AND DelMark = 0
             `);
 
@@ -1321,11 +1345,13 @@ const updateWorkLocation = async (req, res) => {
             .input("WorkLocationId", sql.Int, WorkLocationId)
             .input("WorkLocationName", sql.NVarChar, WorkLocationName)
             .input("UserId", sql.Int, UserId)
+            .input("LocationId", sql.Int, LocationId)
             .query(`
                 UPDATE WorkLocationMaster
                 SET WorkLocationName = @WorkLocationName,
                     UpdatedOn = GETDATE(),
-                    UpdatedBy = @UserId
+                    UpdatedBy = @UserId,
+                    LocationId = @LocationId
                 WHERE WorkLocationId = @WorkLocationId AND DelMark = 0
             `);
 
@@ -1374,7 +1400,7 @@ const deleteWorkLocation = async (req, res) => {
 // READ
 const getWorkLocations = async (req, res) => {
     try {
-        const { CompanyId, UserId } = req.body;
+        const { CompanyId, UserId, LocationId } = req.body;
         const pool = await poolPromise;
 
         if (!CompanyId || !UserId) {
@@ -1386,10 +1412,12 @@ const getWorkLocations = async (req, res) => {
         
         const result = await pool.request()
             .input("CompanyId", sql.Int, CompanyId)
+            .input("LocationId", sql.Int, LocationId)
             .query(`
                 SELECT *
                 FROM WorkLocationMaster
                 WHERE CompanyId = @CompanyId
+                  AND LocationId = @LocationId
                   AND IsActive = 1 AND DelMark = 0
                 ORDER BY WorkLocationName
             `);
@@ -1580,6 +1608,103 @@ const getDesignations = async (req, res) => {
     }
 };
 
+// Generate a 6-digit OTP
+const generateOtp = () => {
+    return Math.floor(100000 + Math.random() * 900000).toString();
+};
+
+// Send OTP API
+const sendOtp = async (req, res) => {
+    try {
+        const { username, email } = req.body;
+
+        if (!username || !email) {
+            return res.status(400).json({ success: false, message: "Username and email are required." });
+        }
+
+        const pool = await poolPromise;
+        const userResult = await pool.request()
+            .input("username", sql.VarChar, username)
+            .input("email", sql.VarChar, email)
+            .query(`SELECT UserId FROM UserMaster WHERE UserName = @username AND MailId = @email AND IsActive = 1 AND DelMark = 0`);
+
+        if (userResult.recordset.length === 0) {
+            return res.status(404).json({ success: false, message: "User not found." });
+        }
+
+        const userId = userResult.recordset[0].UserId;
+        const otp = generateOtp();
+        const expiry = new Date(Date.now() + 10 * 60 * 1000); // OTP valid for 10 minutes
+
+        await pool.request()
+            .input("userId", sql.Int, userId)
+            .input("otp", sql.VarChar, otp)
+            .input("expiry", sql.DateTime, expiry)
+            .query(`
+                MERGE INTO OtpTable AS target
+                USING (SELECT @userId AS UserId) AS source
+                ON target.UserId = source.UserId
+                WHEN MATCHED THEN
+                    UPDATE SET Otp = @otp, Expiry = @expiry
+                WHEN NOT MATCHED THEN
+                    INSERT (UserId, Otp, Expiry) VALUES (@userId, @otp, @expiry);
+            `);
+
+        await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: email,
+            subject: "Your OTP Code",
+            text: `Your OTP code is ${otp}. It is valid for 10 minutes.`
+        });
+
+        res.json({ success: true, message: "OTP sent successfully.", userId: userId , username: username, email: email});
+    } catch (error) {
+        console.error("Error in sendOtp:", error);
+        res.status(500).json({ success: false, message: "Failed to send OTP." });
+    }
+};
+
+// Verify OTP API
+const verifyOtp = async (req, res) => {
+    try {
+        const { userId, otp } = req.body;
+
+        if (!userId || !otp) {
+            return res.status(400).json({ success: false, message: "UserId and OTP are required." });
+        }
+
+        const checkUserId = pool.request()
+            .input("userId", sql.Int, userId)
+            .query(`SELECT 1 FROM UserMaster WHERE UserId = @userId AND IsActive = 1 AND DelMark = 0`);
+        const userExists = (await checkUserId).recordset.length > 0;
+
+        if (!userExists) {
+            return res.status(404).json({ success: false, message: "User not found." });
+        }
+
+        const pool = await poolPromise;
+        const otpResult = await pool.request()
+            .input("userId", sql.Int, userId)
+            .input("otp", sql.VarChar, otp)
+            .query(`SELECT Expiry FROM OtpTable WHERE UserId = @userId AND Otp = @otp`);
+
+        if (otpResult.recordset.length === 0) {
+            return res.status(400).json({ success: false, message: "Invalid OTP." });
+        }
+
+        const expiry = otpResult.recordset[0].Expiry;
+        if (new Date() > expiry) {
+            return res.status(400).json({ success: false, message: "OTP has expired." });
+        }
+
+        res.json({ success: true, message: "OTP verified successfully." , userId: userId, username: userExists.username, email: userExists.email});
+    } catch (error) {
+        console.error("Error in verifyOtp:", error);
+        res.status(500).json({ success: false, message: "Failed to verify OTP." });
+    }
+};
+
+
 
 
 
@@ -1620,5 +1745,7 @@ module.exports = {
     addDesignation,
     updateDesignation,
     deleteDesignation,
-    getDesignations
+    getDesignations,
+    sendOtp,
+    verifyOtp
 };

@@ -37,7 +37,9 @@ const {
     addDesignation,
     updateDesignation,
     deleteDesignation,
-    getDesignations
+    getDesignations,
+    sendOtp,
+    verifyOtp
 } = require('../interfaces/masterController.js');
 const { 
     upload,
@@ -184,6 +186,13 @@ router.post("/designation/add", addDesignation);
 router.post("/designation/update", updateDesignation);
 router.post("/designation/delete", deleteDesignation);
 router.post("/designation/list", getDesignations);
+
+/* ================= OTP AUTHENTICATION ================= */
+// Route to send OTP
+router.post('/send-otp', sendOtp);
+
+// Route to verify OTP
+router.post('/verify-otp', verifyOtp);
 
 
 module.exports = router;

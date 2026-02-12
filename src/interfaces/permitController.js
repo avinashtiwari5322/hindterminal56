@@ -194,7 +194,7 @@ const closePermit = async (req, res) => {
         const roleId = user.RoleId;
 
         // Role-based status: if superadmin (RoleId=4) -> Close, otherwise -> Closer Pending
-        const newStatus = (roleId === 4) ? 'Close' : 'Closer Pending';
+        const newStatus = (roleId === 4) ? 'Closed' : 'Closer Pending';
 
         // Update CurrentPermitStatus accordingly in UserPermitMaster
         const updateResult = await pool.request()
@@ -326,7 +326,7 @@ const closePermit = async (req, res) => {
         const mailOptions = {
             from: process.env.EMAIL_USER,
             to: recipients.join(','),
-            subject: `Work Permit ${permit.PermitNumber} ${newStatus === 'Close' ? 'Closed' : 'Closer Pending'}`,
+            subject: `Work Permit ${permit.PermitNumber} ${newStatus === 'Closed' ? 'Closed' : 'Closer Pending'}`,
             html: `
                 <h2>Work Permit Status Updated</h2>
                 <p><strong>Permit Number:</strong> ${permit.PermitNumber}</p>
@@ -476,6 +476,7 @@ const savePermit = async (req, res) => {
         const {
             PermitTypeId,
             PermitNumber,
+            LocationId,
             UserId,
             Location,
             PermitDate,
@@ -522,6 +523,7 @@ const savePermit = async (req, res) => {
         const intAlarmPointId = parseInt(AlarmPointId, 10);
         const intWorkLocationId = parseInt(WorkLocationId, 10);
         const permitTypeId = parseInt(req.body.PermitTypeId, 10);
+        const LocationIdNum = parseInt(LocationId, 10);
         if (isNaN(permitTypeId) || permitTypeId <= 0) {
             console.error('Invalid PermitTypeId:', req.body.PermitTypeId);
             return res.status(400).json({ error: 'Invalid PermitTypeId. It must be a positive number.' });
@@ -540,12 +542,18 @@ const savePermit = async (req, res) => {
         if (!permitTypeId || !UserId) {
             return res.status(400).json({ error: 'PermitTypeId and UserId are required.' });
         }
-
+        const locationCheck = await pool.request()
+            .input('LocationId', sql.Int, LocationIdNum)
+            .query('SELECT LocationId, LocationName FROM LocationMaster WHERE LocationId = @LocationId AND IsActive = 1 AND DelMark = 0');
+        if (locationCheck.recordset.length === 0) {
+            console.error('LocationId does not exist in LocationMaster:', LocationIdNum);
+            return res.status(400).json({ error: 'Invalid Location. It does not exist.' });
+        }
         
         // Insert into PermitMaster
         // Generate server-side PermitNumber in format: HTPL/<LOCATION_IN_CAPS>/<YYYY-YY>/<seq>
         // Use WorkLocation if provided, otherwise Location, fallback to 'UNKNOWN'
-        const rawLocation = (Location ).toString().trim();
+        const rawLocation = (locationCheck?.recordset[0]?.LocationName || 'UNKNOWN').toString().trim();
         // Normalize location: remove quotes/slashes and collapse whitespace, make uppercase
         const locNorm = rawLocation.replace(/["'\\/]/g, '').replace(/\s+/g, '').toUpperCase();
 
@@ -629,10 +637,11 @@ const savePermit = async (req, res) => {
             .input('CreatedBy', sql.NVarChar(100), UserId)
             .input('ReferencePermitId', sql.Int, referencePermitId)
             .input('IsReopened', sql.Bit, isReopened)
+            .input('LocationId', sql.Int, LocationIdNum)
             .query(`
-                INSERT INTO PermitMaster (PermitTypeId, PermitNumber, CreatedBy, ReferencePermitId, IsReopened)
+                INSERT INTO PermitMaster (PermitTypeId, PermitNumber, CreatedBy, ReferencePermitId, IsReopened, LocationId)
                 OUTPUT INSERTED.PermitId
-                VALUES (@PermitTypeId, @PermitNumber, @CreatedBy, @ReferencePermitId, @IsReopened)
+                VALUES (@PermitTypeId, @PermitNumber, @CreatedBy, @ReferencePermitId, @IsReopened, @LocationId)
             `);
 
         const PermitId = permitMasterResult.recordset[0].PermitId;
@@ -770,6 +779,34 @@ const savePermit = async (req, res) => {
                     `);
             }
         }
+         // Fetch users with RoleId = 2 and matching LocationId
+        const usersWithRole = await pool.request()
+            .input('RoleId', sql.Int, 2)
+            .input('LocationId', sql.Int, LocationIdNum)
+            .query(`
+                SELECT MailId
+                FROM UserMaster
+                WHERE RoleId = @RoleId AND LocationId = @LocationId AND IsActive = 1 AND DelMark = 0
+            `);
+
+        const recipientEmails = usersWithRole.recordset.map(user => user.MailId).filter(email => email);
+
+        if (recipientEmails.length > 0) {
+            const mailOptions = {
+                from: process.env.EMAIL_USER,
+                to: recipientEmails.join(','),
+                subject: `New Permit Created: ${generatedPermitNumber}`,
+                html: `
+                    <h2>New Work Permit Created</h2>
+                    <p><strong>Permit Number:</strong> ${generatedPermitNumber}</p>
+                    <p><strong>Location:</strong> ${rawLocation}</p>
+                    <p><strong>Work Description:</strong> ${WorkDescription}</p>
+                    <p>Please review the permit details in the system.</p>
+                `
+            };
+
+             transporter.sendMail(mailOptions);
+        }
 
 
         res.status(201).json({ 
@@ -867,7 +904,7 @@ const getPermitsByUser = async (req, res) => {
 
             // --- Add permitReachTo logic (single-stage string) ---
             let reach = null;
-            if (String(permit.CurrentPermitStatus) === 'Closer Pending' || String(permit.CurrentPermitStatus) === 'Close') {
+            if (String(permit.CurrentPermitStatus) === 'Closer Pending' || String(permit.CurrentPermitStatus) === 'Closed') {
                 try {
                     const pcsRes = await pool.request()
                         .input('PermitId', sql.Numeric(18, 0), permit.PermitId)
@@ -966,85 +1003,115 @@ const getPermitsByUser = async (req, res) => {
 // Get all permits
 const getPermits = async (req, res) => {
     try {
-        // Accept filters from body (POST) or query (GET). Prefer body for POST route.
+        // Accept filters from body (POST) or query (GET). Prefer body.
         const params = req.body && Object.keys(req.body).length ? req.body : req.query || {};
-        // Accept common aliases from frontend: UserId or userId, Location or locationId
-        const UserId = params.UserId || params.userId || null;
-        const Location = params.Location || params.location || params.locationId || params.location_id || null;
-        let page = parseInt(params.page, 10) || 1;
-        let pageSize = parseInt(params.pageSize, 10) || 20;
+
+        // Extract filters (all optional)
+        const UserId       = params.UserId || params.userId || null;
+        const LocationId   = params.locationId || params.LocationId || null;
+        const status       = params.status || null;
+        const fromDate     = params.fromDate || null;
+        const toDate       = params.toDate || null;
+        const isExport     = params.export === true || params.export === 'true' || false;
+
+        // Pagination only used when !isExport
+        let page     = isExport ? 1 : parseInt(params.page, 10) || 1;
+        let pageSize = isExport ? 999999 : Math.min(Math.max(1, parseInt(params.pageSize, 10) || 20), 500);
+
         if (page < 1) page = 1;
-        if (pageSize < 1) pageSize = 20;
 
         const offset = (page - 1) * pageSize;
 
         const pool = await poolPromise;
 
-        // Build WHERE clause dynamically
-        const whereClauses = ['upm.IsActive = 1', 'upm.DelMark = 0'];
+        // ── Build dynamic WHERE clause ──────────────────────────────────────
+        const whereClauses = [
+            'upm.IsActive = 1',
+            'upm.DelMark = 0'
+        ];
+
+        const request = pool.request(); // we'll reuse one request object
+
+        // User filter
         if (UserId && !isNaN(parseInt(UserId, 10))) {
             whereClauses.push('upm.UserId = @UserId');
-        }
-        // For Location, we'll check type-specific WorkLocation fields using EXISTS
-        const locationFilter = Location && String(Location).trim() !== '' ? String(Location).trim() : null;
-        let locationExistsSql = '';
-        let permitNumberPattern = null;
-        if (locationFilter) {
-            // normalize location for PermitNumber match (remove slashes/quotes/spaces, uppercase)
-            const locNorm = locationFilter.replace(/["'\\/]/g, '').replace(/\s+/g, '').toUpperCase();
-            // pattern to match PermitNumber like HTPL/<LOC>/YYYY-YY/%
-            permitNumberPattern = `%/${locNorm}/%`;
-
-            locationExistsSql = `(
-                EXISTS (SELECT 1 FROM HeightWorkPermit h WHERE h.PermitId = p.PermitId AND h.WorkLocation LIKE @LocationPattern) OR
-                EXISTS (SELECT 1 FROM HotWorkPermit h2 WHERE h2.PermitId = p.PermitId AND h2.WorkLocation LIKE @LocationPattern) OR
-                EXISTS (SELECT 1 FROM ElectricWorkPermit e WHERE e.PermitId = p.PermitId AND e.WorkLocation LIKE @LocationPattern) OR
-                EXISTS (SELECT 1 FROM GeneralWorkPermit g WHERE g.PermitId = p.PermitId AND g.WorkLocation LIKE @LocationPattern) OR
-                UPPER(p.PermitNumber) LIKE @PermitNumberPattern
-            )`;
-            whereClauses.push(locationExistsSql);
+            request.input('UserId', sql.Int, parseInt(UserId, 10));
         }
 
-        const whereSql = whereClauses.length ? 'WHERE ' + whereClauses.join(' AND ') : '';
+        // Location filter
+        if (LocationId && !isNaN(parseInt(LocationId, 10))) {
+            whereClauses.push('p.LocationId = @LocationId');
+            request.input('LocationId', sql.Int, parseInt(LocationId, 10));
+        }
 
-        // Get total count for pagination
-        const countReq = pool.request();
-        if (UserId && !isNaN(parseInt(UserId, 10))) countReq.input('UserId', sql.Int, parseInt(UserId, 10));
-        if (locationFilter) countReq.input('LocationPattern', sql.NVarChar(200), `%${locationFilter}%`);
-        if (permitNumberPattern) countReq.input('PermitNumberPattern', sql.NVarChar(200), permitNumberPattern);
-        const countSql = `SELECT COUNT(*) AS total FROM PermitMaster p INNER JOIN UserPermitMaster upm ON p.PermitID = upm.PermitId ${whereSql}`;
-        const countRes = await countReq.query(countSql);
-        const total = (countRes.recordset && countRes.recordset[0] && countRes.recordset[0].total) ? parseInt(countRes.recordset[0].total, 10) : 0;
+        // Status filter (on CurrentPermitStatus)
+        if (status && typeof status === 'string' && status.trim()) {
+            whereClauses.push('upm.CurrentPermitStatus = @Status');
+            request.input('Status', sql.NVarChar(100), status.trim());
+        }
 
-        // Fetch paginated permits
-        const listReq = pool.request();
-        if (UserId && !isNaN(parseInt(UserId, 10))) listReq.input('UserId', sql.Int, parseInt(UserId, 10));
-        if (locationFilter) listReq.input('LocationPattern', sql.NVarChar(200), `%${locationFilter}%`);
-        if (permitNumberPattern) listReq.input('PermitNumberPattern', sql.NVarChar(200), permitNumberPattern);
-        listReq.input('OffsetRows', sql.Int, offset);
-        listReq.input('PageSize', sql.Int, pageSize);
+        // Date range filter → using CreatedOn
+        if (fromDate && toDate) {
+            whereClauses.push('p.CreatedOn >= @FromDate AND p.CreatedOn < DATEADD(DAY, 1, @ToDate)');
+            request.input('FromDate', sql.Date, new Date(fromDate));
+            request.input('ToDate',   sql.Date, new Date(toDate));
+        } else if (fromDate) {
+            whereClauses.push('p.CreatedOn >= @FromDate');
+            request.input('FromDate', sql.Date, new Date(fromDate));
+        } else if (toDate) {
+            whereClauses.push('p.CreatedOn < DATEADD(DAY, 1, @ToDate)');
+            request.input('ToDate', sql.Date, new Date(toDate));
+        }
 
-        const listSql = `
-            SELECT p.*, 
-                   upm.CurrentPermitStatus,
-                   upm.Status as PermitStatus,
-                   ptm.PermitType,
-                   (SELECT COUNT(*) FROM PERMIT_FILES f WHERE f.PermitID = p.PermitID) as FileCount
+        const whereSql = whereClauses.length > 0
+            ? 'WHERE ' + whereClauses.join(' AND ')
+            : '';
+
+        // ── Get total count (still needed for paginated response) ───────────
+        const countSql = `
+            SELECT COUNT(*) AS total
+            FROM PermitMaster p
+            INNER JOIN UserPermitMaster upm ON p.PermitID = upm.PermitId
+            ${whereSql}
+        `;
+
+        const countRes  = await request.query(countSql);
+        const total     = countRes.recordset?.[0]?.total || 0;
+
+        // ── Main list query ─────────────────────────────────────────────────
+        let listSql = `
+            SELECT 
+                p.*,
+                upm.CurrentPermitStatus,
+                upm.Status AS PermitStatus,
+                ptm.PermitType,
+                (SELECT COUNT(*) FROM PERMIT_FILES f WHERE f.PermitID = p.PermitID) AS FileCount
             FROM PermitMaster p
             INNER JOIN UserPermitMaster upm ON p.PermitID = upm.PermitId
             INNER JOIN PermitTypeMaster ptm ON p.PermitTypeId = ptm.PermitTypeId
             ${whereSql}
             ORDER BY p.CreatedOn DESC
-            OFFSET @OffsetRows ROWS FETCH NEXT @PageSize ROWS ONLY
         `;
 
-        const result = await listReq.query(listSql);
+        // Only apply pagination when NOT exporting
+        if (!isExport) {
+            listSql += `
+                OFFSET @OffsetRows ROWS 
+                FETCH NEXT @PageSize ROWS ONLY
+            `;
+            request.input('OffsetRows', sql.Int, offset);
+            request.input('PageSize',   sql.Int, pageSize);
+        }
 
+        const result = await request.query(listSql);
+
+        // ── Enrich each permit ──────────────────────────────────────────────
         const permits = [];
 
         for (const permit of result.recordset) {
             let detailsQuery = '';
-            switch (permit.PermitTypeId) {
+
+            switch (Number(permit.PermitTypeId)) {
                 case 1:
                     detailsQuery = `
                         SELECT h.*,
@@ -1100,33 +1167,42 @@ const getPermits = async (req, res) => {
                         WHERE g.PermitId = @PermitId
                     `;
                     break;
+
                 default:
                     permit.Files = [];
                     permits.push(permit);
                     continue;
             }
 
-            const detailsResult = await pool.request()
-                .input('PermitId', sql.Int, permit.PermitId)
-                .query(detailsQuery);
-            const details = detailsResult.recordset[0] || {};
-            const redundantFields = ['PermitId', 'PermitNumber'];
-            for (const key in details) {
-                if (details.hasOwnProperty(key) && !redundantFields.includes(key)) {
-                    permit[key] = details[key];
+            if (detailsQuery) {
+                const detailsResult = await pool.request()
+                    .input('PermitId', sql.Int, permit.PermitId)
+                    .query(detailsQuery);
+
+                const details = detailsResult.recordset[0] || {};
+                const redundantFields = ['PermitId', 'PermitNumber'];
+
+                for (const key in details) {
+                    if (Object.prototype.hasOwnProperty.call(details, key) && !redundantFields.includes(key)) {
+                        permit[key] = details[key];
+                    }
                 }
             }
-            // Get files for the permit
+
+            // Get files
             const filesResult = await pool.request()
                 .input('PermitId', sql.Int, permit.PermitId)
-                .query('SELECT FileID, FileName, FileSize, FileType, UploadDate FROM PERMIT_FILES WHERE PermitID = @PermitId ORDER BY UploadDate DESC');
-            permit.Files = filesResult.recordset;
+                .query(`
+                    SELECT FileID, FileName, FileSize, FileType, UploadDate 
+                    FROM PERMIT_FILES 
+                    WHERE PermitID = @PermitId 
+                    ORDER BY UploadDate DESC
+                `);
+            permit.Files = filesResult.recordset || [];
 
-            // --- Add permitReachTo logic (single-stage string).
-            // If permit is in close flow, prefer PermitCloseStatus to determine the current stage;
-            // otherwise fall back to *_UpdatedBy fields.
+            // permitReachTo logic (your original block – kept as-is)
             let reach = null;
-            if (String(permit.CurrentPermitStatus) === 'Closer Pending' || String(permit.CurrentPermitStatus) === 'Close') {
+            if (String(permit.CurrentPermitStatus) === 'Closer Pending' || String(permit.CurrentPermitStatus) === 'Closed') {
                 try {
                     const pcsRes = await pool.request()
                         .input('PermitId', sql.Numeric(18, 0), permit.PermitId)
@@ -1140,7 +1216,6 @@ const getPermits = async (req, res) => {
                             { timeCol: 'IsolationCloseTime', name: 'isolation' },
                             { timeCol: 'ApproverCloseTime', name: 'approver' }
                         ];
-                        // Determine the most recently closed stage by timestamp (choose latest datetime)
                         let lastClosed = null;
                         let lastClosedTime = null;
                         for (const s of order) {
@@ -1155,14 +1230,9 @@ const getPermits = async (req, res) => {
                                 }
                             }
                         }
-                        if (lastClosed) {
-                            reach = lastClosed;
-                        } else {
-                            // No stage closed yet: return first pending (issuer)
-                            reach = 'issuer';
-                        }
+                        reach = lastClosed || 'issuer';
                     } else {
-                        // fallback to UpdatedBy fields
+                        // fallback
                         if (permit?.Approver_UpdatedBy) reach = 'approver';
                         else if (permit?.Reviewer_UpdatedBy) reach = 'reviewer';
                         else if (permit?.Receiver_UpdatedBy) reach = 'receiver';
@@ -1170,8 +1240,8 @@ const getPermits = async (req, res) => {
                         else reach = 'issuer';
                     }
                 } catch (e) {
-                    console.error('Failed to read PermitCloseStatus for permitReachTo:', e && e.message ? e.message : e);
-                    // fallback to UpdatedBy fields
+                    console.error('Failed to read PermitCloseStatus:', e.message);
+                    // fallback
                     if (permit?.Approver_UpdatedBy) reach = 'approver';
                     else if (permit?.Reviewer_UpdatedBy) reach = 'reviewer';
                     else if (permit?.Receiver_UpdatedBy) reach = 'receiver';
@@ -1179,14 +1249,12 @@ const getPermits = async (req, res) => {
                     else reach = 'issuer';
                 }
             } else {
-                // Determine most recent action among role DateTime fields so isolation is chosen
-                // when its DateTime is the latest even if other UpdatedBy flags exist.
                 const dtMap = [
-                    { col: 'Issuer_DateTime', name: 'issuer' },
-                    { col: 'Receiver_DateTime', name: 'receiver' },
-                    { col: 'Reviewer_DateTime', name: 'reviewer' },
+                    { col: 'Issuer_DateTime',     name: 'issuer' },
+                    { col: 'Receiver_DateTime',   name: 'receiver' },
+                    { col: 'Reviewer_DateTime',   name: 'reviewer' },
                     { col: 'EnergyIsolate_DateTime', name: 'isolation' },
-                    { col: 'Approver_DateTime', name: 'approver' }
+                    { col: 'Approver_DateTime',   name: 'approver' }
                 ];
                 let latest = null;
                 let latestTime = null;
@@ -1202,9 +1270,9 @@ const getPermits = async (req, res) => {
                         }
                     }
                 }
-                if (latest) reach = latest;
-                else {
-                    // fallback to UpdatedBy flags if no DateTimes available
+                if (latest) {
+                    reach = latest;
+                } else {
                     if (permit?.Approver_UpdatedBy) reach = 'approver';
                     else if (permit?.Reviewer_UpdatedBy) reach = 'reviewer';
                     else if (permit?.Receiver_UpdatedBy) reach = 'receiver';
@@ -1214,19 +1282,15 @@ const getPermits = async (req, res) => {
             }
             permit.permitReachTo = reach;
 
-            // Resolve ReferencePermitId to ReferencePermitNumber if reference exists
+            // Resolve ReferencePermitNumber
             if (permit.ReferencePermitId) {
                 try {
                     const refRes = await pool.request()
                         .input('ReferencePermitId', sql.Int, permit.ReferencePermitId)
                         .query('SELECT PermitNumber FROM PermitMaster WHERE PermitId = @ReferencePermitId');
-                    if (refRes.recordset.length > 0) {
-                        permit.ReferencePermitNumber = refRes.recordset[0].PermitNumber;
-                    } else {
-                        permit.ReferencePermitNumber = null;
-                    }
+                    permit.ReferencePermitNumber = refRes.recordset[0]?.PermitNumber || null;
                 } catch (e) {
-                    console.error('Failed to resolve ReferencePermitNumber:', e && e.message ? e.message : e);
+                    console.error('Failed to resolve ReferencePermitNumber:', e.message);
                     permit.ReferencePermitNumber = null;
                 }
             } else {
@@ -1236,10 +1300,27 @@ const getPermits = async (req, res) => {
             permits.push(permit);
         }
 
-        res.json(permits);
+        // ── Response ────────────────────────────────────────────────────────
+        if (isExport) {
+            res.json({
+                data: permits,
+                total: total,
+                exported: true
+            });
+        } else {
+            res.json({
+                data: permits,
+                total: total,
+                page: page,
+                pageSize: pageSize
+            });
+        }
     } catch (error) {
         console.error('Error fetching permits:', error);
-        res.status(500).json({ error: 'Failed to fetch permits: ' + error.message });
+        res.status(500).json({ 
+            error: 'Failed to fetch permits', 
+            message: error.message 
+        });
     }
 };
 

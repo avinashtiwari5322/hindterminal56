@@ -67,7 +67,7 @@ const { comparePassword } = require('./masterController'); // ✅ correct import
 
 const login = async (req, res) => {
     try {
-        const { UserName, Password } = req.body;
+        const { UserName, Password, LocationId } = req.body;
 
         if (!UserName || !Password) {
             return res.status(400).json({
@@ -81,6 +81,7 @@ const login = async (req, res) => {
         // 1️⃣ Fetch user with hashed password
         const result = await pool.request()
             .input('UserName', sql.VarChar, UserName)
+            .input('LocationId', sql.Int, LocationId)
             .query(`
                 SELECT 
                     u.UserId,
@@ -89,11 +90,13 @@ const login = async (req, res) => {
                     u.MailId,
                     u.Password,
                     u.RoleId,
+                    u.LocationId,
                     r.RoleName,
                     uc.CompanyId
                 FROM UserMaster u
                 INNER JOIN RoleMaster r ON u.RoleId = r.RoleId
                 INNER JOIN UserCompanyMaster uc ON u.UserId = uc.UserId
+                INNER JOIN LocationMaster lm ON u.LocationId = lm.LocationId AND lm.LocationId = @LocationId And lm.IsActive = 1 AND lm.DelMark = 0
                 WHERE u.UserName = @UserName
                   AND u.IsActive = 1
                   AND u.DelMark = 0
@@ -128,7 +131,8 @@ const login = async (req, res) => {
                 Email: user.MailId,
                 RoleId: user.RoleId,
                 RoleName: user.RoleName,
-                CompanyId: user.CompanyId
+                CompanyId: user.CompanyId,
+                LocationId: user.LocationId
             }
         });
 

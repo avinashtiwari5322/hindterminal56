@@ -1,0 +1,7 @@
+-- Create the OTP table
+CREATE TABLE OtpTable (
+    UserId INT NOT NULL PRIMARY KEY,
+    Otp VARCHAR(6) NOT NULL,
+    Expiry DATETIME NOT NULL,
+    CONSTRAINT FK_User FOREIGN KEY (UserId) REFERENCES UserMaster(UserId) ON DELETE CASCADE
+);
